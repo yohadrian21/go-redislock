@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  enable:
+    - errorlint
+    - gocritic
+    - godot
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+    - usestdlibvars
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*github.com/redis/go-redis/v9.Client).Close
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/yohadrian21/go-redislock

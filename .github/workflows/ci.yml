@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Check go.mod is tidy
+        run: go mod tidy -diff
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.26.x", "1.27.x"]
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Test
+        run: go test -race -count=1 -cover ./...
+      - name: Run example programs
+        run: |
+          go run ./examples/basic
+          go run ./examples/watchdog
+          go run ./examples/fencing
