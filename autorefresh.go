@@ -36,9 +36,9 @@ func (l *Lock) AutoRefresh(ctx context.Context) (context.Context, context.Cancel
 		defer ticker.Stop()
 
 		for {
-			// Other errors are retried on the next tick; if they persist,
-			// expire fires once the lock may have run out.
 			start := time.Now()
+			// Errors other than ErrNotHeld are retried on the next tick; if
+			// they persist, expire fires once the lock may have run out.
 			switch err := l.Refresh(ctx, l.ttl); {
 			case err == nil:
 				expire.Reset(time.Until(start.Add(l.ttl)))
