@@ -121,7 +121,7 @@ func TestIntegrationAutoRefreshDetectsLostLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	waitDone(t, ctx, 2*time.Second)
+	waitDone(t, ctx.Done(), 2*time.Second)
 	if err := context.Cause(ctx); !errors.Is(err, redislock.ErrNotHeld) {
 		t.Errorf("cause = %v, want ErrNotHeld", err)
 	}

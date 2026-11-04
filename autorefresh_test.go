@@ -43,7 +43,7 @@ func TestAutoRefreshDetectsLostLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	waitDone(t, ctx, 2*time.Second)
+	waitDone(t, ctx.Done(), 2*time.Second)
 	if err := context.Cause(ctx); !errors.Is(err, redislock.ErrNotHeld) {
 		t.Errorf("cause = %v, want ErrNotHeld", err)
 	}
@@ -65,7 +65,7 @@ func TestAutoRefreshGivesUpWhenRedisIsUnreachable(t *testing.T) {
 	defer stop()
 	mr.SetError("ERR connection lost")
 
-	waitDone(t, ctx, 2*time.Second)
+	waitDone(t, ctx.Done(), 2*time.Second)
 	if err := context.Cause(ctx); !errors.Is(err, redislock.ErrNotHeld) {
 		t.Errorf("cause = %v, want ErrNotHeld", err)
 	}
@@ -82,7 +82,7 @@ func TestAutoRefreshStop(t *testing.T) {
 	ctx, stop := lock.AutoRefresh(t.Context())
 	stop()
 
-	waitDone(t, ctx, time.Second)
+	waitDone(t, ctx.Done(), time.Second)
 	if err := context.Cause(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("cause = %v, want context.Canceled", err)
 	}
@@ -107,7 +107,7 @@ func TestAutoRefreshStopsWithParentContext(t *testing.T) {
 	defer stop()
 	cancel()
 
-	waitDone(t, ctx, time.Second)
+	waitDone(t, ctx.Done(), time.Second)
 	if err := context.Cause(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("cause = %v, want context.Canceled", err)
 	}
@@ -124,10 +124,10 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
-func waitDone(t *testing.T, ctx context.Context, timeout time.Duration) {
+func waitDone(t *testing.T, done <-chan struct{}, timeout time.Duration) {
 	t.Helper()
 	select {
-	case <-ctx.Done():
+	case <-done:
 	case <-time.After(timeout):
 		t.Fatalf("context not done within %v", timeout)
 	}
