@@ -71,6 +71,42 @@ func (c *Client) TryLock(ctx context.Context, key string, ttl time.Duration, opt
 	return c.obtain(ctx, key, ttl, newOptions(opts))
 }
 
+// Lock acquires the lock named key for ttl, waiting while another client
+// holds it. Between attempts it sleeps according to [WithBackoff] and
+// [WithJitter].
+//
+// By default Lock keeps retrying until ctx is done, so pass a context with a
+// deadline or use [WithMaxRetries] to bound the wait. If ctx ends first, the
+// returned error wraps both [ErrNotObtained] and the context's error. If the
+// retries run out, Lock returns ErrNotObtained. Other errors, such as a
+// failed connection to Redis, are returned immediately.
+//
+// ttl must be at least one millisecond.
+func (c *Client) Lock(ctx context.Context, key string, ttl time.Duration, opts ...Option) (*Lock, error) {
+	o := newOptions(opts)
+	for attempt := 1; ; attempt++ {
+		lock, err := c.obtain(ctx, key, ttl, o)
+		switch {
+		case err == nil:
+			return lock, nil
+		case ctx.Err() != nil:
+			return nil, fmt.Errorf("%w: %w", ErrNotObtained, context.Cause(ctx))
+		case !errors.Is(err, ErrNotObtained):
+			return nil, err
+		case o.maxRetries >= 0 && attempt > o.maxRetries:
+			return nil, ErrNotObtained
+		}
+
+		timer := time.NewTimer(o.delay(attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("%w: %w", ErrNotObtained, context.Cause(ctx))
+		case <-timer.C:
+		}
+	}
+}
+
 func (c *Client) obtain(ctx context.Context, key string, ttl time.Duration, o *options) (*Lock, error) {
 	if err := checkTTL(ttl); err != nil {
 		return nil, err

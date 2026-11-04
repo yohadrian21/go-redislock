@@ -1,7 +1,10 @@
 package redislock_test
 
 import (
+	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,6 +196,143 @@ func TestFencingTokenSurvivesExpiry(t *testing.T) {
 
 	if second.FencingToken() <= first.FencingToken() {
 		t.Errorf("token after expiry = %d, want more than %d", second.FencingToken(), first.FencingToken())
+	}
+}
+
+func TestLockWaitsForRelease(t *testing.T) {
+	locker, _ := newLocker(t)
+	holder := mustTryLock(t, locker, testKey, 10*time.Second)
+
+	const holdFor = 50 * time.Millisecond
+	go func() {
+		time.Sleep(holdFor)
+		if err := holder.Unlock(context.Background()); err != nil {
+			t.Errorf("Unlock: %v", err)
+		}
+	}()
+
+	start := time.Now()
+	lock, err := locker.Lock(t.Context(), testKey, time.Second,
+		redislock.WithBackoff(redislock.ConstantBackoff(5*time.Millisecond)))
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	if waited := time.Since(start); waited < holdFor {
+		t.Errorf("Lock returned after %v, before the holder released the lock", waited)
+	}
+	if err := lock.Unlock(t.Context()); err != nil {
+		t.Errorf("Unlock: %v", err)
+	}
+}
+
+func TestLockHonorsContextDeadline(t *testing.T) {
+	locker, _ := newLocker(t)
+	mustTryLock(t, locker, testKey, 10*time.Second)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := locker.Lock(ctx, testKey, time.Second)
+	if !errors.Is(err, redislock.ErrNotObtained) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want ErrNotObtained wrapping context.DeadlineExceeded", err)
+	}
+}
+
+func TestLockMaxRetries(t *testing.T) {
+	locker, _ := newLocker(t)
+	mustTryLock(t, locker, testKey, 10*time.Second)
+
+	for _, maxRetries := range []int{0, 3} {
+		var retries []int
+		backoff := func(retry int) time.Duration {
+			retries = append(retries, retry)
+			return time.Millisecond
+		}
+
+		_, err := locker.Lock(t.Context(), testKey, time.Second,
+			redislock.WithBackoff(backoff), redislock.WithMaxRetries(maxRetries))
+
+		if !errors.Is(err, redislock.ErrNotObtained) {
+			t.Errorf("WithMaxRetries(%d): err = %v, want ErrNotObtained", maxRetries, err)
+		}
+		if len(retries) != maxRetries || (maxRetries > 0 && retries[maxRetries-1] != maxRetries) {
+			t.Errorf("WithMaxRetries(%d): backoff called for retries %v", maxRetries, retries)
+		}
+	}
+}
+
+func TestLockReturnsRedisErrorsWithoutRetrying(t *testing.T) {
+	locker, mr := newLocker(t)
+	mr.SetError("ERR server unavailable")
+
+	retried := false
+	backoff := func(int) time.Duration {
+		retried = true
+		return time.Millisecond
+	}
+
+	_, err := locker.Lock(t.Context(), testKey, time.Second, redislock.WithBackoff(backoff))
+	if err == nil || errors.Is(err, redislock.ErrNotObtained) {
+		t.Errorf("err = %v, want the server error", err)
+	}
+	if retried {
+		t.Error("Lock retried after a server error")
+	}
+}
+
+func TestLockMutualExclusion(t *testing.T) {
+	locker, _ := newLocker(t)
+	assertMutualExclusion(t, locker, testKey)
+}
+
+// assertMutualExclusion makes many goroutines compete for the same lock and
+// fails if two of them are ever inside the critical section at once, or if
+// fencing tokens do not increase from one holder to the next.
+func assertMutualExclusion(t *testing.T, locker *redislock.Client, key string) {
+	t.Helper()
+
+	const workers, rounds = 50, 4
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	var (
+		inside    atomic.Int32
+		acquired  atomic.Int32
+		lastToken atomic.Int64
+		wg        sync.WaitGroup
+	)
+	for range workers {
+		wg.Go(func() {
+			for range rounds {
+				lock, err := locker.Lock(ctx, key, 10*time.Second, redislock.WithFencing(),
+					redislock.WithBackoff(redislock.ExponentialBackoff(time.Millisecond, 20*time.Millisecond)))
+				if err != nil {
+					t.Errorf("Lock: %v", err)
+					return
+				}
+
+				if n := inside.Add(1); n != 1 {
+					t.Errorf("%d goroutines hold the lock at the same time", n)
+				}
+				token := lock.FencingToken()
+				if prev := lastToken.Swap(token); token <= prev {
+					t.Errorf("fencing token %d issued after %d", token, prev)
+				}
+				time.Sleep(time.Millisecond) // widen the window for overlapping holders
+				inside.Add(-1)
+				acquired.Add(1)
+
+				if err := lock.Unlock(ctx); err != nil {
+					t.Errorf("Unlock: %v", err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	if got := acquired.Load(); got != workers*rounds {
+		t.Errorf("lock acquired %d times, want %d", got, workers*rounds)
 	}
 }
 
